@@ -1,4 +1,4 @@
-# Reactive streams for Go [![GoDoc][godoc-img]][godoc] ![Build Status][build-img]
+# Reactive streams for Go
 
 A reactive streams library for Go in the spirit of Reactive Extensions (Rx) implemented
 with generic functions. The library provides a rich set of utilities for wiring

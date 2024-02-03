@@ -107,6 +107,57 @@ func TestThrottle(t *testing.T) {
 	}
 }
 
+func TestFlatMap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	negated := func(x int) Observable[int] {
+		return FromSlice([]int{x, -x})
+	}
+
+	// 1. mapping a non-empty source
+	{
+		src := Range(0, 3)
+		src = FlatMap(src, negated)
+		result, err := ToSlice(ctx, src)
+		assertNil(t, "case 1", err)
+		assertSlice(t, "case 1", []int{0, 0, 1, -1, 2, -2}, result)
+	}
+
+	// 2. mapping an empty source
+	{
+		src := FlatMap(Empty[int](), negated)
+		result, err := ToSlice(ctx, src)
+		assertNil(t, "case 2", err)
+		assertSlice(t, "case 2", []int{}, result)
+	}
+
+	// 3. cancelled context
+	checkCancelled(t, "case 3", FlatMap(Range(0, 100), negated))
+}
+
+func TestConcat(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1. successful case
+	res1, err := ToSlice(ctx, Concat(Just(1), Just(2), Just(3)))
+	if err != nil {
+		t.Fatalf("case 1 errored: %s", err)
+	}
+	assertSlice(t, "case 1", res1, []int{1, 2, 3})
+
+	// 2. test cancelled concat
+	checkCancelled(t, "case 2", Concat(Just(1), Stuck[int]()))
+
+	// 3. test empty concat
+	res3, err := ToSlice(ctx, Concat[int]())
+	if err != nil {
+		t.Fatalf("case 3 errored: %s", err)
+	}
+	assertSlice(t, "case 3", []int{}, res3)
+}
+
 func TestRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
