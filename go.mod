@@ -1,6 +1,6 @@
 module github.com/cilium/stream
 
-go 1.21.3
+go 1.21.0
 
 require (
 	github.com/stretchr/testify v1.8.4
