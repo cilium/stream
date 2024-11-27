@@ -6,6 +6,7 @@ package stream_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,6 +283,75 @@ func TestDebounce(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected Canceled error, got %s", err)
 	}
+}
+
+func TestDebounceSlowConsumer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	in := make(chan struct{})
+	defer close(in)
+
+	mcast, connect := ToMulticast(FromChannel(in))
+	src := Debounce(mcast, 5*time.Millisecond)
+
+	consumer := func(wg *sync.WaitGroup, d time.Duration, n *int) {
+		defer wg.Done()
+
+		for range ToChannel(ctx, src) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+				*n++
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// slow consumer
+	var slow int
+	wg.Add(1)
+	go consumer(&wg, time.Hour, &slow)
+
+	// fast consumer
+	var fast int
+	wg.Add(1)
+	go consumer(&wg, time.Millisecond, &fast)
+
+	connect(ctx)
+
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+stop:
+	for {
+		select {
+		case <-timer.C:
+			break stop
+		case in <- struct{}{}:
+		}
+	}
+
+	cancel()
+	wg.Wait()
+
+	// slow consumer should not slow down a fast consumer
+	assert.Zero(t, slow)
+	assert.Greater(t, fast, slow)
+}
+
+func TestDebounceEmpty(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	src := Debounce(Empty[struct{}](), time.Millisecond)
+
+	errs := make(chan error)
+	defer close(errs)
+
+	_, ok := <-ToChannel(ctx, src, WithErrorChan(errs))
+	assert.False(t, ok)
+	assert.NoError(t, <-errs)
 }
 
 func TestBuffer(t *testing.T) {

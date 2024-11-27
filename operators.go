@@ -5,6 +5,7 @@ package stream
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -268,46 +269,80 @@ func Debounce[T any](src Observable[T], duration time.Duration) Observable[T] {
 		func(ctx context.Context, next func(T), complete func(error)) {
 			errs := make(chan error, 1)
 			items := ToChannel(ctx, src, WithErrorChan(errs))
+
+			var (
+				mu      sync.Mutex
+				latest  *T
+				version uint64
+
+				ready = make(chan struct{}, 1)
+			)
+
+			go func() {
+				defer close(ready)
+
+				for item := range items {
+					item := item
+
+					mu.Lock()
+					latest = &item
+					version++
+					mu.Unlock()
+
+					select {
+					case ready <- struct{}{}:
+					default:
+					}
+				}
+			}()
+
 			go func() {
 				defer close(errs)
 
 				timer := time.NewTimer(duration)
 				defer timer.Stop()
 
+				itemReady := false
 				timerElapsed := true // Do not delay the first item.
-				var latest *T
+				var emitted uint64
 
 				for {
 					select {
 					case err := <-errs:
 						complete(err)
 						return
-
-					case item, ok := <-items:
+					case _, ok := <-ready:
 						if !ok {
-							items = nil
-							latest = nil
 							continue
 						}
-
-						if timerElapsed {
-							next(item)
-							timerElapsed = false
-							latest = nil
-							timer.Reset(duration)
-						} else {
-							latest = &item
-						}
-
+						itemReady = true
 					case <-timer.C:
-						if latest != nil {
-							next(*latest)
-							latest = nil
-							timer.Reset(duration)
-						} else {
-							timerElapsed = true
-						}
+						timerElapsed = true
 					}
+
+					if !itemReady || !timerElapsed {
+						continue
+					}
+
+					var item T
+
+					mu.Lock()
+					current := version
+					item = *latest
+					mu.Unlock()
+
+					if current <= emitted {
+						// current element already emitted
+						itemReady = false
+						continue
+					}
+
+					next(item)
+
+					emitted++
+					timerElapsed = false
+					itemReady = false
+					timer.Reset(duration)
 				}
 			}()
 		})
