@@ -8,7 +8,9 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -109,4 +111,121 @@ func TestToChannel(t *testing.T) {
 	test(10, false)
 	test(0, true)
 	test(10, true)
+}
+
+func TestToTruncatingChannel(t *testing.T) {
+	testCases := []struct {
+		name      string
+		withErrCh bool
+	}{
+		{
+			name:      "without error chan",
+			withErrCh: false,
+		},
+		{
+			name:      "with error chan",
+			withErrCh: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			in := make(chan int)
+
+			var errCh chan error
+			if tc.withErrCh {
+				// Use unbuffered to make sure item channel is closed first.
+				errCh = make(chan error)
+				defer close(errCh)
+			}
+
+			nums := ToTruncatingChannel(ctx, FromChannel(in), WithErrorChan(errCh))
+
+			// each item from the source is observed
+			for i := 0; i <= 5; i++ {
+				in <- i
+				item := <-nums
+				assert.Equal(t, i, item)
+			}
+
+			// the observable is decoupled from the consumer
+			for i := 5; i <= 10; i++ {
+				in <- i
+			}
+
+			// simulate a busy consumer
+			time.Sleep(5 * time.Millisecond)
+
+			// when the consumer becomes available again, it observes the last item
+			item := <-nums
+			assert.Equal(t, 10, item)
+
+			close(in)
+
+			_, ok := <-nums
+			assert.False(t, ok)
+
+			if errCh != nil {
+				assert.NoError(t, <-errCh)
+			}
+		})
+	}
+}
+
+func TestToTruncatingChannelSlowConsumer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	in := make(chan struct{})
+	defer close(in)
+
+	mcast, connect := ToMulticast(FromChannel(in))
+	src := ToTruncatingChannel(ctx, mcast)
+
+	consumer := func(wg *sync.WaitGroup, d time.Duration, n *int) {
+		defer wg.Done()
+
+		for range src {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+				*n++
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// slow consumer
+	var slow int
+	wg.Add(1)
+	go consumer(&wg, time.Hour, &slow)
+
+	// fast consumer
+	var fast int
+	wg.Add(1)
+	go consumer(&wg, time.Millisecond, &fast)
+
+	connect(ctx)
+
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+stop:
+	for {
+		select {
+		case <-timer.C:
+			break stop
+		case in <- struct{}{}:
+		}
+	}
+
+	cancel()
+	wg.Wait()
+
+	// slow consumer should not slow down a fast consumer
+	assert.Zero(t, slow)
+	assert.Greater(t, fast, slow)
 }
